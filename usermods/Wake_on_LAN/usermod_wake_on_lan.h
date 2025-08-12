@@ -2,6 +2,10 @@
 
 #include "wled.h"
 
+#ifdef ESP32
+  #include <ETH.h>
+#endif
+
 #ifndef USERMOD_WAKE_ON_LAN_H
 #define USERMOD_WAKE_ON_LAN_H
 
@@ -16,9 +20,14 @@ class UsermodWakeOnLAN : public Usermod {
     unsigned long timeoutDuration = 300000;  // 5 minutes total timeout
     bool sendOnWifiConnect = true;           // Send WOL when WiFi connects
     bool periodicRetry = true;               // Enable periodic retries
+    bool useMultiplePorts = true;            // Send to both port 7 and 9
+    bool useLimitedBroadcast = true;         // Use 255.255.255.255
     
     // MAC address storage (6 bytes)
     uint8_t targetMAC[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    
+    // Custom target IP for cross-segment WOL (optional)
+    IPAddress customTargetIP = IPAddress(0, 0, 0, 0);
     
     // UDP for sending WOL packets
     WiFiUDP udp;
@@ -31,13 +40,56 @@ class UsermodWakeOnLAN : public Usermod {
     static const char _timeoutDuration[];
     static const char _sendOnWifiConnect[];
     static const char _periodicRetry[];
+    static const char _useMultiplePorts[];
+    static const char _useLimitedBroadcast[];
+    static const char _customTargetIP[];
     
     /**
-     * Send a Wake-on-LAN magic packet
+     * Get current network interface information
      */
-    void sendWOLPacket() {
-      if (!WiFi.isConnected()) {
-        DEBUG_PRINTLN(F("WOL: WiFi not connected, cannot send packet"));
+    bool getNetworkInfo(IPAddress& localIP, IPAddress& subnetMask, IPAddress& gateway) {
+      // Check WiFi first
+      if (WiFi.isConnected()) {
+        localIP = WiFi.localIP();
+        subnetMask = WiFi.subnetMask();
+        gateway = WiFi.gatewayIP();
+        DEBUG_PRINTLN(F("WOL: Using WiFi interface"));
+        return true;
+      }
+      
+      #ifdef ETHERNET_ENABLE
+      // Check Ethernet if available
+      if (ETH.linkUp()) {
+        localIP = ETH.localIP();
+        subnetMask = ETH.subnetMask();
+        gateway = ETH.gatewayIP();
+        DEBUG_PRINTLN(F("WOL: Using Ethernet interface"));
+        return true;
+      }
+      #endif
+      
+      DEBUG_PRINTLN(F("WOL: No network interface available"));
+      return false;
+    }
+    
+    /**
+     * Calculate broadcast address for current network
+     */
+    IPAddress calculateBroadcastAddress(const IPAddress& localIP, const IPAddress& subnetMask) {
+      IPAddress broadcastIP;
+      for (int i = 0; i < 4; i++) {
+        broadcastIP[i] = localIP[i] | (~subnetMask[i]);
+      }
+      return broadcastIP;
+    }
+    
+    /**
+     * Send WOL packet to multiple destinations for cross-segment support
+     */
+    void sendWOLPacketMultiple() {
+      IPAddress localIP, subnetMask, gateway;
+      
+      if (!getNetworkInfo(localIP, subnetMask, gateway)) {
         return;
       }
       
@@ -68,32 +120,93 @@ class UsermodWakeOnLAN : public Usermod {
         packet[i] = targetMAC[(i - 6) % 6];
       }
       
-      // Calculate broadcast address
-      #ifdef ESP8266
-      IPAddress broadcastIP = WiFi.localIP();
-      broadcastIP[0] |= (~WiFi.subnetMask()[0]);
-      broadcastIP[1] |= (~WiFi.subnetMask()[1]);
-      broadcastIP[2] |= (~WiFi.subnetMask()[2]);
-      broadcastIP[3] |= (~WiFi.subnetMask()[3]);
-      #else
-      IPAddress broadcastIP = WiFi.localIP() | (~WiFi.subnetMask());
-      #endif
+      bool packetSent = false;
       
-      // Send the packet
-      if (udp.beginPacket(broadcastIP, 9)) {
+      // 1. Send to local broadcast address
+      IPAddress localBroadcast = calculateBroadcastAddress(localIP, subnetMask);
+      if (sendWOLToAddress(packet, localBroadcast, 9)) {
+        packetSent = true;
+        DEBUG_PRINTF("WOL: Sent to local broadcast %s:9\n", localBroadcast.toString().c_str());
+      }
+      
+      // 2. Send to limited broadcast address (255.255.255.255) if enabled
+      if (useLimitedBroadcast) {
+        IPAddress limitedBroadcast(255, 255, 255, 255);
+        if (sendWOLToAddress(packet, limitedBroadcast, 9)) {
+          packetSent = true;
+          DEBUG_PRINTF("WOL: Sent to limited broadcast %s:9\n", limitedBroadcast.toString().c_str());
+        }
+      }
+      
+      // 3. Send to additional ports for better compatibility if enabled
+      if (useMultiplePorts) {
+        if (sendWOLToAddress(packet, localBroadcast, 7)) {
+          DEBUG_PRINTF("WOL: Sent to local broadcast %s:7\n", localBroadcast.toString().c_str());
+        }
+        
+        if (useLimitedBroadcast && sendWOLToAddress(packet, IPAddress(255, 255, 255, 255), 7)) {
+          DEBUG_PRINTF("WOL: Sent to limited broadcast %s:7\n", IPAddress(255, 255, 255, 255).toString().c_str());
+        }
+      }
+      
+      // 4. Send to custom target IP if specified (for cross-segment)
+      if (customTargetIP != IPAddress(0, 0, 0, 0)) {
+        if (sendWOLToAddress(packet, customTargetIP, 9)) {
+          packetSent = true;
+          DEBUG_PRINTF("WOL: Sent to custom target %s:9\n", customTargetIP.toString().c_str());
+        }
+        
+        if (useMultiplePorts && sendWOLToAddress(packet, customTargetIP, 7)) {
+          DEBUG_PRINTF("WOL: Sent to custom target %s:7\n", customTargetIP.toString().c_str());
+        }
+      }
+      
+      // 5. For cross-segment support, also try gateway if different from local network
+      if (gateway != IPAddress(0, 0, 0, 0)) {
+        // Check if gateway is in different subnet
+        bool differentSubnet = false;
+        for (int i = 0; i < 4; i++) {
+          if ((gateway[i] & subnetMask[i]) != (localIP[i] & subnetMask[i])) {
+            differentSubnet = true;
+            break;
+          }
+        }
+        
+        if (differentSubnet) {
+          if (sendWOLToAddress(packet, gateway, 9)) {
+            DEBUG_PRINTF("WOL: Sent via gateway %s:9\n", gateway.toString().c_str());
+          }
+        }
+      }
+      
+      if (packetSent) {
+        lastWOL = millis();
+        DEBUG_PRINTF("WOL: Magic packet(s) sent for %02X:%02X:%02X:%02X:%02X:%02X\n",
+                    targetMAC[0], targetMAC[1], targetMAC[2], 
+                    targetMAC[3], targetMAC[4], targetMAC[5]);
+      } else {
+        DEBUG_PRINTLN(F("WOL: Failed to send any packets"));
+      }
+    }
+    
+    /**
+     * Send WOL packet to specific address and port
+     */
+    bool sendWOLToAddress(uint8_t* packet, const IPAddress& address, uint16_t port) {
+      if (udp.beginPacket(address, port)) {
         size_t written = udp.write(packet, 102);
         if (udp.endPacket() && written == 102) {
-          lastWOL = millis();
-          DEBUG_PRINTF("WOL: Magic packet sent to %02X:%02X:%02X:%02X:%02X:%02X via %s:9\n",
-                      targetMAC[0], targetMAC[1], targetMAC[2], 
-                      targetMAC[3], targetMAC[4], targetMAC[5],
-                      broadcastIP.toString().c_str());
-        } else {
-          DEBUG_PRINTLN(F("WOL: Failed to send packet"));
+          return true;
         }
-      } else {
-        DEBUG_PRINTLN(F("WOL: Failed to begin UDP packet"));
       }
+      return false;
+    }
+    
+    /**
+     * Send a Wake-on-LAN magic packet (legacy method for compatibility)
+     */
+    void sendWOLPacket() {
+      sendWOLPacketMultiple();
     }
     
     /**
@@ -143,7 +256,7 @@ class UsermodWakeOnLAN : public Usermod {
     void connected() override {
       if (!enabled || !initDone) return;
       
-      DEBUG_PRINTLN(F("WOL: WiFi connected"));
+      DEBUG_PRINTLN(F("WOL: Network connected"));
       
       if (sendOnWifiConnect && !triggered) {
         triggered = true;
@@ -152,15 +265,34 @@ class UsermodWakeOnLAN : public Usermod {
     }
     
     /**
+     * Check if any network interface is connected
+     */
+    bool isNetworkConnected() {
+      if (WiFi.isConnected()) return true;
+      
+      #ifdef ETHERNET_ENABLE
+      if (ETH.linkUp()) return true;
+      #endif
+      
+      return false;
+    }
+    
+    /**
      * Main loop function
      */
     void loop() override {
-      if (!enabled || !initDone || !WiFi.isConnected()) return;
+      if (!enabled || !initDone || !isNetworkConnected()) return;
+      
+      // Reset trigger after timeout
+      if (triggered && (millis() - lastWOL >= timeoutDuration)) {
+        triggered = false;
+        DEBUG_PRINTLN(F("WOL: Timeout reached, stopping retries"));
+        return;
+      }
       
       // Handle periodic retries
       if (periodicRetry && triggered && 
-          (millis() - lastWOL >= retryDelay) && 
-          (millis() <= timeoutDuration)) {
+          (millis() - lastWOL >= retryDelay)) {
         sendWOLPacket();
       }
     }
@@ -224,6 +356,9 @@ class UsermodWakeOnLAN : public Usermod {
       top[FPSTR(_timeoutDuration)] = timeoutDuration / 1000; // Convert to seconds for UI
       top[FPSTR(_sendOnWifiConnect)] = sendOnWifiConnect;
       top[FPSTR(_periodicRetry)] = periodicRetry;
+      top[FPSTR(_useMultiplePorts)] = useMultiplePorts;
+      top[FPSTR(_useLimitedBroadcast)] = useLimitedBroadcast;
+      top[FPSTR(_customTargetIP)] = customTargetIP.toString();
     }
     
     /**
@@ -249,6 +384,14 @@ class UsermodWakeOnLAN : public Usermod {
       
       configComplete &= getJsonValue(top[FPSTR(_sendOnWifiConnect)], sendOnWifiConnect);
       configComplete &= getJsonValue(top[FPSTR(_periodicRetry)], periodicRetry);
+      configComplete &= getJsonValue(top[FPSTR(_useMultiplePorts)], useMultiplePorts);
+      configComplete &= getJsonValue(top[FPSTR(_useLimitedBroadcast)], useLimitedBroadcast);
+      
+      // Read custom target IP
+      String customIPString = top[FPSTR(_customTargetIP)] | "";
+      if (!customIPString.isEmpty()) {
+        customTargetIP.fromString(customIPString);
+      }
       
       return configComplete;
     }
@@ -274,6 +417,12 @@ class UsermodWakeOnLAN : public Usermod {
       oappend(F(":"));
       oappend(String(FPSTR(_timeoutDuration)).c_str());
       oappend(F("',1,'Total timeout duration in seconds');"));
+      
+      oappend(F("addInfo('"));
+      oappend(String(FPSTR(_name)).c_str());
+      oappend(F(":"));
+      oappend(String(FPSTR(_customTargetIP)).c_str());
+      oappend(F("',1,'Custom target IP for cross-segment WOL (optional)');"));
     }
 
 #ifndef WLED_DISABLE_MQTT
@@ -311,5 +460,8 @@ const char UsermodWakeOnLAN::_retryDelay[] PROGMEM = "retryDelay";
 const char UsermodWakeOnLAN::_timeoutDuration[] PROGMEM = "timeoutDuration";
 const char UsermodWakeOnLAN::_sendOnWifiConnect[] PROGMEM = "sendOnWifiConnect";
 const char UsermodWakeOnLAN::_periodicRetry[] PROGMEM = "periodicRetry";
+const char UsermodWakeOnLAN::_useMultiplePorts[] PROGMEM = "useMultiplePorts";
+const char UsermodWakeOnLAN::_useLimitedBroadcast[] PROGMEM = "useLimitedBroadcast";
+const char UsermodWakeOnLAN::_customTargetIP[] PROGMEM = "customTargetIP";
 
 #endif // USERMOD_WAKE_ON_LAN_H
