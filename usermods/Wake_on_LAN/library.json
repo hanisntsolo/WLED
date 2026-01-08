@@ -1,0 +1,4 @@
+{
+  "name": "Wake_on_LAN",
+  "build": { "libArchive": false }
+}
