@@ -121,6 +121,19 @@ class UsermodCountdown7Seg : public Usermod {
     unsigned long lastBlinkTime = 0;       // Last blink toggle
     unsigned long lastDebugPrint = 0;      // For periodic debug prints
     
+    // Pending config application (non-blocking settings update)
+    bool pendingConfig = false;             // Is there a cached config to apply?
+    unsigned long configApplyAt = 0;        // When to apply cached config (millis)
+    // Cached config values and flags
+    bool cachedHasEnabled = false;
+    bool cachedEnabled = false;
+    bool cachedHasTestMode = false;
+    bool cachedTestMode = false;
+    bool cachedHasTarget = false;
+    uint32_t cachedTargetTimestamp = 0;
+    bool cachedHasReset = false;
+    uint32_t cachedResetDays = 0;
+    
     // Timing constants
     static const unsigned long MULTIPLEX_INTERVAL_US = 2500;  // 2.5ms per digit = 100Hz refresh
     static const unsigned long COUNTDOWN_UPDATE_MS = 1000;    // Update countdown every second
@@ -461,6 +474,33 @@ class UsermodCountdown7Seg : public Usermod {
      * MUST be non-blocking!
      */
     void loop() override {
+      // Apply any pending config even if module temporarily disabled
+      if (pendingConfig && millis() >= configApplyAt) {
+        pendingConfig = false;
+
+        if (cachedHasReset) {
+          resetCountdown(cachedResetDays);
+          cachedHasReset = false;
+        }
+        if (cachedHasTarget) {
+          targetTimestamp = cachedTargetTimestamp;
+          cachedHasTarget = false;
+        }
+        if (cachedHasEnabled) {
+          enabled = cachedEnabled;
+          cachedHasEnabled = false;
+        }
+        if (cachedHasTestMode) {
+          testMode = cachedTestMode;
+          cachedHasTestMode = false;
+        }
+
+        // Quick re-init and update (keep it short and non-blocking)
+        updateCountdown();
+        initGPIO();
+        DEBUG_PRINTLN(F("Countdown7Seg: Applied pending config"));
+      }
+
       if (!enabled || !initDone) return;
       
       // Always do multiplexing - this is time-critical
@@ -545,25 +585,41 @@ class UsermodCountdown7Seg : public Usermod {
       
       JsonObject usermod = root[FPSTR(_name)];
       if (!usermod.isNull()) {
-        // Check for reset command
+        bool schedule = false;
+
+        // Check for reset command (cache it)
         if (usermod.containsKey("reset")) {
           uint32_t days = usermod["reset"] | countdownDays;
-          resetCountdown(days);
+          cachedResetDays = days;
+          cachedHasReset = true;
+          schedule = true;
         }
-        
-        // Check for manual target timestamp
+
+        // Check for manual target timestamp (cache it)
         if (usermod.containsKey("targetTimestamp")) {
-          targetTimestamp = usermod["targetTimestamp"];
+          cachedTargetTimestamp = usermod["targetTimestamp"];
+          cachedHasTarget = true;
+          schedule = true;
         }
-        
-        // Check for enable/disable
+
+        // Check for enable/disable (cache it)
         if (usermod.containsKey("enabled")) {
-          enabled = usermod["enabled"];
+          cachedEnabled = usermod["enabled"];
+          cachedHasEnabled = true;
+          schedule = true;
         }
-        
-        // Check for test mode toggle
+
+        // Check for test mode toggle (cache it)
         if (usermod.containsKey("testMode")) {
-          testMode = usermod["testMode"];
+          cachedTestMode = usermod["testMode"];
+          cachedHasTestMode = true;
+          schedule = true;
+        }
+
+        // Schedule applying cached config in a short debounce window
+        if (schedule) {
+          pendingConfig = true;
+          configApplyAt = millis() + 200; // 200ms debounce to coalesce rapid changes
         }
       }
     }
