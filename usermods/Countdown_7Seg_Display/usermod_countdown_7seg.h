@@ -263,20 +263,25 @@ class UsermodCountdown7Seg : public Usermod {
      */
     int32_t calculateDaysRemaining() {
       if (targetTimestamp == 0 || !ntpEnabled) {
+        DEBUG_PRINTF("Countdown7Seg: calcDays SKIP - target=%lu, ntpEnabled=%d\n", targetTimestamp, ntpEnabled);
         return -1;  // Not configured or NTP not available
       }
       
       time_t now = toki.second();  // Get current epoch time from WLED's time system
       if (now < 1600000000) {
+        DEBUG_PRINTF("Countdown7Seg: calcDays SKIP - NTP not synced (now=%lu)\n", (unsigned long)now);
         return -1;  // Time not yet synced (before Sept 2020)
       }
       
       int32_t secondsRemaining = targetTimestamp - now;
       if (secondsRemaining <= 0) {
+        DEBUG_PRINTF("Countdown7Seg: calcDays=0 (expired) target=%lu, now=%lu\n", targetTimestamp, (unsigned long)now);
         return 0;
       }
       
-      return secondsRemaining / 86400;  // Convert to days
+      int32_t days = secondsRemaining / 86400;
+      DEBUG_PRINTF("Countdown7Seg: calcDays=%ld (target=%lu, now=%lu, secRem=%ld)\n", days, targetTimestamp, (unsigned long)now, secondsRemaining);
+      return days;  // Convert to days
     }
     
     /**
@@ -292,12 +297,16 @@ class UsermodCountdown7Seg : public Usermod {
         digitValues[1] = 11;  // Dash
         digitValues[2] = 11;  // Dash
         digitValues[3] = 11;  // Dash
+        DEBUG_PRINTLN(F("Countdown7Seg: updateCountdown -> showing dashes (NTP not ready)"));
       } else if (daysRemaining > 9999) {
         displayValue = 9999;
         updateDigitValues();
+        DEBUG_PRINTLN(F("Countdown7Seg: updateCountdown -> capped at 9999"));
       } else {
         displayValue = daysRemaining;
         updateDigitValues();
+        DEBUG_PRINTF("Countdown7Seg: updateCountdown -> display=%u digits=[%u,%u,%u,%u]\n", 
+                     displayValue, digitValues[0], digitValues[1], digitValues[2], digitValues[3]);
       }
     }
     
@@ -425,16 +434,26 @@ class UsermodCountdown7Seg : public Usermod {
      * Called when WiFi is connected
      */
     void connected() override {
-      DEBUG_PRINTLN(F("Countdown7Seg: WiFi connected"));
+      // Send multiple debug beacons to ensure at least one gets through
+      DEBUG_PRINTLN(F(""));
+      DEBUG_PRINTLN(F("========================================"));
+      DEBUG_PRINTLN(F("  WLED DEBUG BEACON - WiFi CONNECTED!"));
+      DEBUG_PRINTLN(F("  Countdown7Seg Usermod Active"));
+      DEBUG_PRINTLN(F("========================================"));
+      DEBUG_PRINTLN(F(""));
       
       // If target timestamp is not set and we have NTP time, set it
       if (targetTimestamp == 0 && countdownDays > 0) {
         time_t now = toki.second();
         if (now > 1600000000) {
           targetTimestamp = now + (countdownDays * 86400);
-          DEBUG_PRINTF("Countdown7Seg: Target set to %lu\n", targetTimestamp);
+          DEBUG_PRINTF("Countdown7Seg: Target set to %u\n", targetTimestamp);
         }
       }
+      
+      // Print current config for debugging
+      DEBUG_PRINTF("Countdown7Seg: Config - days=%u, target=%u, testMode=%d, enabled=%d\n", 
+                   countdownDays, targetTimestamp, testMode, enabled);
     }
     
     /**
@@ -450,7 +469,31 @@ class UsermodCountdown7Seg : public Usermod {
       // Update countdown value periodically (not every loop)
       if (millis() - lastCountdownUpdate >= COUNTDOWN_UPDATE_MS) {
         lastCountdownUpdate = millis();
-        updateCountdown();
+        
+        // Periodic debug status (every 10 seconds)
+        static unsigned long lastStatusPrint = 0;
+        if (millis() - lastStatusPrint >= 10000) {
+          lastStatusPrint = millis();
+          DEBUG_PRINTF("Countdown7Seg: STATUS testMode=%d, enabled=%d, target=%lu, days=%u, display=%u\n",
+                       testMode, enabled, targetTimestamp, countdownDays, displayValue);
+          DEBUG_PRINTF("Countdown7Seg: STATUS digits=[%u,%u,%u,%u], ntpEnabled=%d, ntpTime=%lu\n",
+                       digitValues[0], digitValues[1], digitValues[2], digitValues[3], 
+                       ntpEnabled, (unsigned long)toki.second());
+        }
+        
+        // Auto-set target timestamp once NTP syncs (if not already set)
+        if (targetTimestamp == 0 && countdownDays > 0) {
+          time_t now = toki.second();
+          if (now > 1600000000) {  // NTP synced (after Sept 2020)
+            targetTimestamp = now + (countdownDays * 86400);
+            DEBUG_PRINTF("Countdown7Seg: Auto-set target to %lu (%u days)\n", targetTimestamp, countdownDays);
+          }
+        }
+        
+        // Skip countdown update if in test mode
+        if (!testMode) {
+          updateCountdown();
+        }
         handleBlinking();
       }
     }

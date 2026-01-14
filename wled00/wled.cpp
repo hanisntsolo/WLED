@@ -1,4 +1,5 @@
 #define WLED_DEFINE_GLOBAL_VARS //only in one source file, wled.cpp!
+#define WLED_DEBUG
 #include "wled.h"
 #include "wled_ethernet.h"
 #ifdef WLED_ENABLE_AOTA

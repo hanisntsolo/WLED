@@ -53,7 +53,7 @@ class UsermodWakeOnLAN : public Usermod {
         localIP = WiFi.localIP();
         subnetMask = WiFi.subnetMask();
         gateway = WiFi.gatewayIP();
-        DEBUG_PRINTLN(F("WOL: Using WiFi interface"));
+        // DEBUG_PRINTLN(F("WOL: Using WiFi interface")); // Too noisy
         return true;
       }
       
@@ -63,12 +63,12 @@ class UsermodWakeOnLAN : public Usermod {
         localIP = ETH.localIP();
         subnetMask = ETH.subnetMask();
         gateway = ETH.gatewayIP();
-        DEBUG_PRINTLN(F("WOL: Using Ethernet interface"));
+        // DEBUG_PRINTLN(F("WOL: Using Ethernet interface")); // Too noisy
         return true;
       }
       #endif
       
-      DEBUG_PRINTLN(F("WOL: No network interface available"));
+      // DEBUG_PRINTLN(F("WOL: No network interface available")); // Too noisy
       return false;
     }
     
@@ -103,7 +103,7 @@ class UsermodWakeOnLAN : public Usermod {
       }
       
       if (!macIsSet) {
-        DEBUG_PRINTLN(F("WOL: Target MAC address not configured"));
+        // DEBUG_PRINTLN(F("WOL: Target MAC address not configured")); // Too noisy - called on every retry
         return;
       }
       
